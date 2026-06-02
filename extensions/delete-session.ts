@@ -216,12 +216,13 @@ export default function (pi: ExtensionAPI) {
       const container = new Container();
 
       const topBorder = new DynamicBorder((s: string) => theme.fg("accent", s));
-      const title = new Text(theme.fg("accent", theme.bold(` ${titleLabel} (${sessions.length} sessions) `)), 1, 0);
-      const help1 = new Text(theme.fg("dim", " ↑↓ navigate • Space toggle • a toggle all • Enter delete selected • Esc cancel "), 1, 0);
+      const title = new Text(theme.fg("accent", theme.bold(` ${titleLabel} (${sessions.length}) `)), 1, 0);
+      const help1 = new Text(theme.fg("dim", " ↑↓ - navigate | space - toggle | a - all | enter - delete | esc - cancel "), 1, 0);
       const bottomBorder = new DynamicBorder((s: string) => theme.fg("accent", s));
 
       container.addChild(topBorder);
       container.addChild(title);
+      container.addChild(new Text("\x1b[0m", 1, 0));
 
       const rowComponents: Text[] = [];
       const visibleRows = Math.min(sessions.length, 12);
@@ -231,8 +232,7 @@ export default function (pi: ExtensionAPI) {
         container.addChild(rowText);
       }
 
-      const statusLine = new Text("", 1, 0);
-      container.addChild(statusLine);
+      container.addChild(new Text("\x1b[0m", 1, 0));
       container.addChild(help1);
       container.addChild(bottomBorder);
 
@@ -244,24 +244,18 @@ export default function (pi: ExtensionAPI) {
           if (!s) { rowComponents[i].setText(""); continue; }
 
           const isCursor = itemIdx === cursor;
-          const checkbox = s.selected ? theme.fg("success", "[✓]") : theme.fg("dim", "[ ]");
-          const name = (s.name.length > 42 ? s.name.slice(0, 42) + "…" : s.name) || "(empty)";
+          const checkbox = s.selected ? theme.fg("success", "[✓]") : "[ ]";
+          const name = (s.name.length > 48 ? s.name.slice(0, 48) + "…" : s.name) || "(empty)";
           const meta = s.invalid
-            ? `INVALID • ${formatDate(s.modified)} • ${formatBytes(s.size ?? 0)}`
-            : `${s.messageCount} msgs • ${formatDate(s.modified)} • ${formatBytes(s.size ?? 0)}`;
+            ? `INVALID, ${formatDate(s.modified)}, ${formatBytes(s.size ?? 0)}`
+            : `${s.messageCount} msgs, ${formatDate(s.modified)}, ${formatBytes(s.size ?? 0)}`;
 
-          const cursorIndicator = isCursor ? theme.fg("accent", "▸ ") : "  ";
-          const nameStyled = isCursor ? theme.fg("accent", theme.bold(name)) : theme.fg("muted", name);
-          const metaStyled = theme.fg("muted", meta);
-          rowComponents[i].setText(`${cursorIndicator}${checkbox} ${nameStyled}  ${metaStyled}`);
+          const cursorIndicator = isCursor ? theme.fg("success", "▸ ") : "  ";
+          const namePadded = name.padEnd(52, " ");
+          const nameStyled = isCursor ? theme.fg("success", theme.bold(namePadded)) : namePadded;
+          const metaStyled = isCursor ? theme.fg("success", `(${meta})`) : `(${meta})`;
+          rowComponents[i].setText(`${cursorIndicator}${checkbox} ${nameStyled}${metaStyled}`);
         }
-
-        const selectedCount = items.filter((s) => s.selected).length;
-        statusLine.setText(
-          theme.fg("muted", `Selected: `)
-            + (selectedCount > 0 ? theme.fg("success", `${selectedCount}`) : theme.fg("dim", "0"))
-            + theme.fg("muted", ` / ${items.length}`)
-        );
       }
 
       function clampScroll() {
