@@ -1,6 +1,8 @@
 # pi-delete-session
 
-A powerful session deletion tool for the [Pi coding agent](https://github.com/badlogic/pi-mono). Bulk delete unwanted sessions, grouped by project, with a single command.
+[![npm version](https://img.shields.io/npm/v/pi-delete-session.svg)](https://www.npmjs.com/package/pi-delete-session)
+
+A powerful session deletion tool for the [Pi coding agent](https://github.com/earendil-works/pi). Bulk delete unwanted sessions, grouped by project, with a single command.
 
 ## Features
 
