@@ -1,6 +1,6 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { DynamicBorder, SessionManager, getAgentDir } from "@mariozechner/pi-coding-agent";
-import { Container, Text, SelectList, type SelectItem } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder, SessionManager, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { Container, Text, SelectList, type SelectItem } from "@earendil-works/pi-tui";
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { readdir, readFile, unlink, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
