@@ -1,9 +1,10 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder, SessionManager, getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Container, Text, SelectList, type SelectItem } from "@earendil-works/pi-tui";
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
-import { readdir, readFile, unlink, stat } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { stat, unlink } from "node:fs/promises";
+import { basename } from "node:path";
+
+type CommandContext = ExtensionCommandContext;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -14,7 +15,6 @@ interface SessionDisplay {
   messageCount: number;
   modified: Date;
   size?: number;
-  invalid?: boolean;
 }
 
 interface SelectableSession extends SessionDisplay {
@@ -35,174 +35,43 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function getSessionsDir(): string {
-  return join(getAgentDir(), "sessions");
-}
-
-function getDefaultSessionDir(cwd: string): string {
-  const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-  return join(getSessionsDir(), safePath);
-}
-
-function decodeSessionFolderName(folder: string): string {
-  const inner = folder.startsWith("--") && folder.endsWith("--") ? folder.slice(2, -2) : folder;
-
-  // Windows cwd: C:\Users\me\app -> --C--Users-me-app--
-  if (/^[A-Za-z]--/.test(inner)) {
-    return `${inner[0]}:\\${inner.slice(3).replace(/-/g, "\\")}`;
-  }
-
-  // POSIX cwd: /home/me/app -> --home-me-app--
-  if (inner && !inner.includes("\\")) {
-    return `/${inner.replace(/-/g, "/")}`;
-  }
-
-  return inner;
-}
-
-function extractMessageText(message: any): string {
-  const content = message?.content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((block) => block?.type === "text" && typeof block.text === "string")
-    .map((block) => block.text)
-    .join(" ");
-}
-
-async function buildSessionDisplay(filePath: string): Promise<SessionDisplay | null> {
-  const invalid = async (reason = "invalid session"): Promise<SessionDisplay> => {
-    const stats = await stat(filePath);
-    const folder = basename(dirname(filePath));
-    return {
-      path: filePath,
-      name: `[invalid session] ${basename(filePath)} (${reason})`,
-      cwd: decodeSessionFolderName(folder),
-      messageCount: 0,
-      modified: stats.mtime,
-      size: stats.size,
-      invalid: true,
-    };
-  };
-
-  try {
-    const content = await readFile(filePath, "utf8");
-    const lines = content.split("\n").filter((line) => line.trim());
-    if (lines.length === 0) return invalid("empty file");
-
-    const entries: any[] = [];
-    let malformed = 0;
-    for (const line of lines) {
-      try { entries.push(JSON.parse(line)); } catch { malformed++; }
-    }
-    if (entries.length === 0) return invalid("malformed json");
-
-    const header = entries[0];
-    if (header?.type !== "session") return invalid("missing session header");
-
-    const stats = await stat(filePath);
-    let messageCount = 0;
-    let firstMessage = "";
-    let name: string | undefined;
-    let lastActivityTime = 0;
-
-    for (const entry of entries) {
-      if (entry?.type === "session_info") name = entry.name?.trim() || undefined;
-      if (entry?.type !== "message") continue;
-
-      messageCount++;
-      const message = entry.message;
-      if (message?.role !== "user" && message?.role !== "assistant") continue;
-
-      if (typeof message.timestamp === "number") lastActivityTime = Math.max(lastActivityTime, message.timestamp);
-      else if (typeof entry.timestamp === "string") {
-        const t = new Date(entry.timestamp).getTime();
-        if (!Number.isNaN(t)) lastActivityTime = Math.max(lastActivityTime, t);
-      }
-
-      const text = extractMessageText(message);
-      if (!firstMessage && message.role === "user" && text) firstMessage = text;
-    }
-
-    const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;
-    const modified = lastActivityTime > 0
-      ? new Date(lastActivityTime)
-      : (!Number.isNaN(headerTime) ? new Date(headerTime) : stats.mtime);
-
-    return {
-      path: filePath,
-      name: name || firstMessage.slice(0, 60) || "(unnamed)",
-      cwd: typeof header.cwd === "string" ? header.cwd : "",
-      messageCount,
-      modified,
-      size: stats.size,
-      invalid: malformed > 0,
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function listSessionFiles(dir: string): Promise<string[]> {
-  try {
-    const entries = await readdir(dir, { withFileTypes: true });
-    return entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
-      .map((entry) => join(dir, entry.name));
-  } catch {
-    return [];
-  }
-}
-
+// ── Session listing ─────────────────────────────────────────────────────────
+// Uses the public SessionManager.list()/listAll() APIs (sorted newest-first)
+// instead of hand-rolled directory scans, so session discovery always matches
+// pi's own session layout and header parsing. Each command invocation re-lists
+// from disk, so there is no stale-cache concern.
 async function loadSessions(scope: "cwd" | "all", cwd: string): Promise<SessionDisplay[]> {
-  // Fresh disk scan every command invocation. Avoid SessionManager list cache/stale state.
-  let files: string[] = [];
-
-  if (scope === "cwd") {
-    files = await listSessionFiles(getDefaultSessionDir(cwd));
-  } else {
-    try {
-      const projectDirs = (await readdir(getSessionsDir(), { withFileTypes: true }))
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => join(getSessionsDir(), entry.name));
-      const perDir = await Promise.all(projectDirs.map(listSessionFiles));
-      files = perDir.flat();
-    } catch {
-      files = [];
-    }
-  }
-
-  const sessions = (await Promise.all(files.map(buildSessionDisplay)))
-    .filter((s): s is SessionDisplay => Boolean(s));
-  return sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+  const infos = scope === "cwd"
+    ? await SessionManager.list(cwd)
+    : await SessionManager.listAll();
+  const sessions: SessionDisplay[] = infos.map((info) => ({
+    path: info.path,
+    name: info.name?.trim() || info.firstMessage.slice(0, 60) || "(unnamed)",
+    cwd: info.cwd,
+    messageCount: info.messageCount,
+    modified: info.modified,
+  }));
+  // Sizes are best-effort display metadata (not part of SessionInfo).
+  await Promise.all(sessions.map(async (s) => {
+    s.size = await sessionFileSize(s.path);
+  }));
+  return sessions;
 }
 
-function installMissingSessionFilePatch() {
-  const proto = SessionManager.prototype as any;
-  if (proto.__deleteSessionMissingFilePatch) return;
-  proto.__deleteSessionMissingFilePatch = true;
-
-  const originalPersist = proto._persist;
-  proto._persist = function (entry: any) {
-    if (this.persist && this.sessionFile && this.flushed && !existsSync(this.sessionFile)) {
-      const dir = dirname(this.sessionFile);
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      for (const e of this.fileEntries ?? []) appendFileSync(this.sessionFile, `${JSON.stringify(e)}\n`);
-      this.flushed = true;
-      return;
-    }
-    return originalPersist.call(this, entry);
-  };
+async function sessionFileSize(path: string): Promise<number | undefined> {
+  try {
+    return (await stat(path)).size;
+  } catch {
+    return undefined;
+  }
 }
 
 // ── Extension ─────────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  installMissingSessionFilePatch();
-
   // ── Multi-select session picker with checkboxes ────────────────────────────
   async function multiSelectSessions(
-    ctx: any,
+    ctx: CommandContext,
     sessions: SessionDisplay[],
     titleLabel: string
   ): Promise<string[]> {
@@ -246,9 +115,7 @@ export default function (pi: ExtensionAPI) {
           const isCursor = itemIdx === cursor;
           const checkbox = s.selected ? theme.fg("success", "[✓]") : "[ ]";
           const name = (s.name.length > 48 ? s.name.slice(0, 48) + "…" : s.name) || "(empty)";
-          const meta = s.invalid
-            ? `INVALID, ${formatDate(s.modified)}, ${formatBytes(s.size ?? 0)}`
-            : `${s.messageCount} msgs, ${formatDate(s.modified)}, ${formatBytes(s.size ?? 0)}`;
+          const meta = `${s.messageCount} msgs, ${formatDate(s.modified)}, ${formatBytes(s.size ?? 0)}`;
 
           const cursorIndicator = isCursor ? theme.fg("success", "▸ ") : "  ";
           const namePadded = name.padEnd(52, " ");
@@ -290,7 +157,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ── Red confirmation ───────────────────────────────────────────────────────
-  async function confirmBatchDelete(ctx: any, selectedPaths: string[], sessions: SessionDisplay[]): Promise<boolean> {
+  async function confirmBatchDelete(ctx: CommandContext, selectedPaths: string[], sessions: SessionDisplay[]): Promise<boolean> {
     const names = selectedPaths
       .map((p) => sessions.find((s) => s.path === p)?.name ?? p)
       .map((n) => (n.length > 50 ? n.slice(0, 50) + "…" : n));
@@ -322,7 +189,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ── Project Picker ─────────────────────────────────────────────────────────
-  async function pickProject(ctx: any, sessions: SessionDisplay[]): Promise<string | null> {
+  async function pickProject(ctx: CommandContext, sessions: SessionDisplay[]): Promise<string | null> {
     const projects = new Map<string, SessionDisplay[]>();
     for (const s of sessions) {
       const list = projects.get(s.cwd) || [];
@@ -370,7 +237,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ── Scope Picker ───────────────────────────────────────────────────────────
-  async function pickScope(ctx: any): Promise<"cwd" | "all" | null> {
+  async function pickScope(ctx: CommandContext): Promise<"cwd" | "all" | null> {
     const scopeItems = [
       { value: "cwd", label: "📁 This Project", description: ctx.cwd },
       { value: "all", label: "🌍 Other Projects", description: "Select from all project folders" },
@@ -412,7 +279,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ── Main command ────────────────────────────────────────────────────────────
-  async function runManager(ctx: ExtensionContext) {
+  async function runManager(ctx: CommandContext) {
     const scope = await pickScope(ctx);
     if (!scope) return;
 
@@ -458,10 +325,13 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (currentDeleted) {
-      ctx.ui.notify(`Active session deleted. Starting new session...`, "info");
-      await ctx.newSession();
+      await ctx.newSession({
+        withSession: async (newCtx) => {
+          newCtx.ui.notify(`Active session deleted. Started new session. Deleted ${deleted} session(s).`, "info");
+        },
+      });
     } else {
-      ctx.ui.notify(`Deleted ${deleted} session(s).`, "success");
+      ctx.ui.notify(`Deleted ${deleted} session(s).`, "info");
     }
   }
 
